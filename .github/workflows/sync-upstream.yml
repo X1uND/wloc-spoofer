@@ -1,0 +1,172 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==========================================
+      # Checkout Fork
+      # ==========================================
+      - name: Checkout fork
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # ==========================================
+      # 同步 upstream
+      # ==========================================
+      - name: Sync upstream branches
+        shell: bash
+        run: |
+          set -e
+
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/Yu9191/wloc.git
+
+          git fetch origin --prune
+          git fetch upstream --prune
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          echo "=== Sync main ==="
+
+          # ------------------------------------------
+          # 备份当前 Fork main 的 Workflow
+          # ------------------------------------------
+          rm -rf /tmp/main-workflows
+
+          if git cat-file -e origin/main:.github/workflows 2>/dev/null; then
+            mkdir -p /tmp/main-workflows
+
+            git archive \
+              origin/main \
+              .github/workflows \
+              | tar -x -C /tmp/main-workflows
+
+            echo "main workflow backup completed."
+          else
+            echo "No .github/workflows found on origin/main."
+          fi
+
+          # ------------------------------------------
+          # 同步 main
+          # ------------------------------------------
+          git checkout -B main upstream/main
+
+          # ------------------------------------------
+          # 恢复 Fork 自己的 Workflow
+          # ------------------------------------------
+          if [ -d "/tmp/main-workflows/.github/workflows" ]; then
+            mkdir -p .github
+
+            rm -rf .github/workflows
+
+            cp -R \
+              /tmp/main-workflows/.github/workflows \
+              .github/
+
+            echo "main workflow restored."
+          fi
+
+          # ------------------------------------------
+          # 提交 Workflow 保留内容
+          # ------------------------------------------
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to main."
+          else
+            git commit \
+              -m "Sync main from upstream/main and preserve workflows"
+          fi
+
+          git push origin main --force
+
+          echo "=== Sync geo ==="
+
+          # ------------------------------------------
+          # geo 直接镜像上游
+          # ------------------------------------------
+          git checkout -B geo upstream/geo
+
+          git push origin geo --force
+
+          echo "=== Check 40-day repository activity ==="
+
+          # ==========================================
+          # 40 天维护机制
+          #
+          # 只在 main 上维护 heartbeat
+          # ==========================================
+          git checkout main
+
+          HEARTBEAT_FILE=".github/sync-heartbeat"
+
+          mkdir -p .github
+
+          if [ -f "$HEARTBEAT_FILE" ]; then
+            LAST_HEARTBEAT=$(cat "$HEARTBEAT_FILE")
+
+            LAST_HEARTBEAT_TS=$(
+              date -d "$LAST_HEARTBEAT" +%s 2>/dev/null || echo 0
+            )
+          else
+            LAST_HEARTBEAT_TS=0
+          fi
+
+          NOW_TS=$(date +%s)
+
+          if [ "$LAST_HEARTBEAT_TS" -eq 0 ]; then
+            DAYS=999
+          else
+            DAYS=$(( (NOW_TS - LAST_HEARTBEAT_TS) / 86400 ))
+          fi
+
+          echo "Days since last heartbeat: ${DAYS}"
+
+          if [ "$DAYS" -ge 40 ]; then
+            NOW_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+            echo "Creating heartbeat: ${NOW_UTC}"
+
+            printf '%s\n' "$NOW_UTC" > "$HEARTBEAT_FILE"
+
+            git add "$HEARTBEAT_FILE"
+
+            git commit \
+              -m "chore: keep repository active"
+
+            git push origin main
+
+            echo "Heartbeat commit completed."
+          else
+            echo "No heartbeat required."
+          fi
+
+          echo "=== Sync completed ==="
+
+      # ==========================================
+      # 最终检查
+      # ==========================================
+      - name: Verify branches
+        shell: bash
+        run: |
+          echo "=== Origin branches ==="
+          git ls-remote --heads origin
+
+          echo ""
+          echo "=== Upstream branches ==="
+          git ls-remote --heads upstream
+
+          echo ""
+          echo "=== Sync completed successfully ==="
